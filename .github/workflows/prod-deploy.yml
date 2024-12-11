@@ -1,0 +1,77 @@
+name: Deploy Image Resize Prod Lambda@Edge
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
+  AWS_LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+  AWS_CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+
+      - name: Set Bucket Name
+        env:
+          BUCKET_NAME: ${{ env.AWS_S3_BUCKET_NAME }}
+        run: node .github/actions/set-bucket-name.js
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Test Lambda function
+        run: npm run test
+
+      - name: Build Lambda function
+        run: npm run build
+
+      - name: Package Lambda function
+        run: cd dist && zip -r function.zip .
+
+      - name: Deploy Lambda Function
+        id: deploy_lambda
+        env:
+          LAMBDA_FUNCTION_NAME: ${{ env.AWS_LAMBDA_FUNCTION_NAME }}
+        run: |
+          LAMBDA_VERSION=$(aws lambda update-function-code \
+            --function-name $LAMBDA_FUNCTION_NAME \
+            --zip-file fileb://dist/function.zip \
+            --publish \
+            --query 'Version' \
+            --output text)
+
+          echo "LAMBDA_VERSION=$LAMBDA_VERSION" >> $GITHUB_OUTPUT
+
+          echo "Waiting for Lambda function to become active..."
+          aws lambda wait function-active-v2 --function-name $LAMBDA_FUNCTION_NAME:$LAMBDA_VERSION
+
+          echo "Lambda function is now active"
+
+      - name: Update Cloudfront for Deploying Lambda@Edge
+        env:
+          LAMBDA_FUNCTION_NAME: ${{ env.AWS_LAMBDA_FUNCTION_NAME }}
+          LAMBDA_FUNCTION_VERSION: ${{ steps.deploy_lambda.outputs.LAMBDA_VERSION }}
+          CLOUDFRONT_DISTRIBUTION_ID: ${{ env.AWS_CLOUDFRONT_DISTRIBUTION_ID }}
+        run: node .github/actions/update-cloudfront.js
